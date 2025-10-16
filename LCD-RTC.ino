@@ -231,9 +231,9 @@ public:
     }
   }
   
-  void checkStopConditions() {
+  void checkStopConditions(uint8_t rainProb) {
     if (!isWatering) return;
-
+    if (rainProb >= 70) { stopWatering("probabilidad de lluvia alta"); return; }
     // Hora actual
     uint16_t t = (uint16_t)myRTC.hours * 60u + (uint16_t)myRTC.minutes;
     bool inWindow =
@@ -520,7 +520,7 @@ public:
     
     // Si hay una zona regando, verificar si debe detenerse
     if (wateringZone >= 0) {
-      zones[wateringZone]->checkStopConditions();
+      zones[wateringZone]->checkStopConditions(rainProbability);
       
       // Si se detuvo, apagar bomba y volver servo a home
       if (!zones[wateringZone]->getWateringState()) {
