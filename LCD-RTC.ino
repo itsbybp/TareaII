@@ -76,6 +76,7 @@ public:
 // ===== CLASE: ZONA DE RIEGO =====
 class IrrigationZone {
 private:
+
   uint16_t lastScheduleDay = 0;   // último día que regó por HORARIO (no confundir con lastWateringDay)
   bool startedBySchedule = false; // true si este riego inició en ventana
 
@@ -164,22 +165,22 @@ public:
   bool shouldWater(uint16_t currentDayOfYear, uint16_t currentTimeMin) {
     if (isWatering) return false;
 
-    // 1) ¿Estamos en ventana? (soporta medianoche)
+    // ¿Dentro de ventana? (soporta cruce de medianoche)
     bool inWindow =
       (startTimeMin <= endTimeMin)
         ? (currentTimeMin >= startTimeMin && currentTimeMin < endTimeMin)
         : (currentTimeMin >= startTimeMin ||  currentTimeMin < endTimeMin);
 
-    // 2) HORARIO: arranca según días SIN mirar humedad
+    // HORARIO: cada N días SIN mirar humedad
     if (intervalDays > 0) {
-      int d = (int)currentDayOfYear - (int)lastScheduleDay; // <- ¡OJO! usa lastScheduleDay
-      if (d < 0) d += 365;
+      int d = (int)currentDayOfYear - (int)lastScheduleDay;
+      if (d < 0) d += 365;                    // wrap fin de año
       if (d >= intervalDays && inWindow) {
-        return true;  // en ventana: arranca siempre
+        return true;                          // arranca sí o sí en ventana
       }
     }
 
-    // 3) FUERA de horario: riego por mínima (requiere lectura válida)
+    // FUERA DE HORARIO: riego por mínima (si quieres mantenerlo)
     if (!inWindow && sensor->isValid() && sensor->getLast() < minHumidity) {
       return true;
     }
@@ -187,33 +188,31 @@ public:
     return false;
   }
 
+
+
   
   void startWatering(uint16_t currentDayOfYear) {
-    if (!isWatering) {
-      isWatering = true;
-      wateringStartMillis = millis();
-      lastWateringDay = currentDayOfYear;
-      uint16_t t = (uint16_t)myRTC.hours * 60u + (uint16_t)myRTC.minutes;
-      bool inWindow = (startTimeMin <= endTimeMin)
-                        ? (t >= startTimeMin && t < endTimeMin)
-                        : (t >= startTimeMin ||  t < endTimeMin);
+    // ... (tu código de encender bomba/servo) ...
+    isWatering = true;
+    wateringStartMillis = millis();
 
-      startedBySchedule = inWindow;           // true si inició en ventana
-      if (startedBySchedule) {
-        lastScheduleDay = currentDayOfYear;   // registra SOLO riegos por horario
-      }
+    // Hora actual
+    uint16_t t = (uint16_t)myRTC.hours * 60u + (uint16_t)myRTC.minutes;
+    bool inWindow =
+      (startTimeMin <= endTimeMin)
+        ? (t >= startTimeMin && t < endTimeMin)
+        : (t >= startTimeMin ||  t < endTimeMin);
 
-      // (mantén tu lastWateringDay = currentDayOfYear si ya lo haces)
-
-      startRelay();
-      
-      Serial.print(F(">> Zona "));
-      Serial.print(label);
-      Serial.print(F(" ("));
-      Serial.print(id + 1);
-      Serial.println(F(") INICIANDO riego"));
+    startedBySchedule = inWindow;
+    if (startedBySchedule) {
+      lastScheduleDay = currentDayOfYear;   // <-- SOLO riegos por horario mueven el calendario
     }
+
+    // (Si quieres que "cualquier riego" NO afecte al calendario programado,
+    //  no actualices lastWateringDay aquí. Déjalo solo para estadísticas si lo usas.)
+    // lastWateringDay = currentDayOfYear;  // <- comenta si ya no lo necesitas
   }
+
   
   void stopWatering(const char* reason) {
     startedBySchedule = false;
@@ -231,54 +230,44 @@ public:
     }
   }
   
-  void checkStopConditions(uint8_t rainProb) {
+  void checkStopConditions() {
     if (!isWatering) return;
-    if (rainProb >= 70) { stopWatering("probabilidad de lluvia alta"); return; }
+
     // Hora actual
     uint16_t t = (uint16_t)myRTC.hours * 60u + (uint16_t)myRTC.minutes;
     bool inWindow =
       (startTimeMin <= endTimeMin)
         ? (t >= startTimeMin && t < endTimeMin)
         : (t >= startTimeMin ||  t < endTimeMin);
-
     bool outOfWindow =
       (startTimeMin <= endTimeMin)
         ? (t < startTimeMin || t >= endTimeMin)
         : (t >= endTimeMin && t < startTimeMin);
 
-    // --- Si empezó por HORARIO, manda la ventana ---
+    // Si empezó por HORARIO: solo corta al salir de la ventana
     if (startedBySchedule) {
-      if (outOfWindow) {                 // se acabó el horario
+      if (outOfWindow) {
         stopWatering("fin de ventana horaria");
         startedBySchedule = false;
-        return;
       }
-      // En ventana: IGNORA duración y humedad
-      return;
+      return;  // en ventana: ignora humedad y duración
     }
 
-    // --- Si NO empezó por horario (mínima/manual): aplica reglas normales ---
+    // Si NO empezó por horario: reglas normales
     sensor->read();
 
-    // Duración máxima (solo fuera de horario)
+    // Duración máxima
     uint32_t elapsedMin = (millis() - wateringStartMillis) / 60000UL;
-    if (elapsedMin >= maxDurationMin) {
-      stopWatering("tiempo maximo alcanzado");
-      return;
-    }
+    if (elapsedMin >= maxDurationMin) { stopWatering("tiempo maximo alcanzado"); return; }
 
     if (sensor->isValid()) {
       float h = sensor->getLast();
-      if (h >= maxHumidity) {
-        stopWatering("humedad maxima alcanzada");
-        return;
-      }
-      if (h >= minHumidity) {
-        stopWatering("humedad minima alcanzada");
-        return;
-      }
+      if (h >= maxHumidity) { stopWatering("humedad maxima alcanzada"); return; }
+      if (h >= minHumidity){ stopWatering("humedad minima alcanzada"); return; }
     }
   }
+
+
 
 
   
@@ -520,7 +509,8 @@ public:
     
     // Si hay una zona regando, verificar si debe detenerse
     if (wateringZone >= 0) {
-      zones[wateringZone]->checkStopConditions(rainProbability);
+      zones[wateringZone]->checkStopConditions();
+
       
       // Si se detuvo, apagar bomba y volver servo a home
       if (!zones[wateringZone]->getWateringState()) {
